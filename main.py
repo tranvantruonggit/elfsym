@@ -393,17 +393,18 @@ class ELFSymbolSearchGUI:
             self.results_text.insert(tk.END, "No symbols found.\n")
             return
         
-        # Header
-        header = f"{'Address':<18} {'Size':<10} {'Type':<10} {'Bind':<10} {'Symbol Name'}\n"
+        # Header with 32-bit address column
+        header = f"{'Address':<10} {'Size':<10} {'Type':<10} {'Bind':<10} {'Symbol Name'}\n"
         self.results_text.insert(tk.END, header)
         self.results_text.insert(tk.END, "-" * 80 + "\n")
         
-        # Symbol entries
+        # Symbol entries with 32-bit address formatting
         for symbol in symbols:
-            address_str = f"0x{symbol.address:016x}" if symbol.address != 0 else "0x0"
+            # Format address as 32-bit (8 hex digits) instead of 64-bit
+            address_str = f"0x{symbol.address:08x}" if symbol.address != 0 else "0x0"
             size_str = str(symbol.size) if symbol.size != 0 else "0"
             
-            line = f"{address_str:<18} {size_str:<10} {symbol.type:<10} {symbol.bind:<10} {symbol.name}\n"
+            line = f"{address_str:<10} {size_str:<10} {symbol.type:<10} {symbol.bind:<10} {symbol.name}\n"
             self.results_text.insert(tk.END, line)
     
     def _search_symbols(self) -> None:
