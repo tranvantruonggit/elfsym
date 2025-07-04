@@ -27,6 +27,7 @@ class SearchMode(Enum):
     FUZZY = "fuzzy"
     WILDCARD = "wildcard"
     REGEX = "regex"
+    ADDRESS = "address"
 
 
 @dataclass
@@ -150,6 +151,72 @@ class SymbolSearchEngine:
         
         return pattern
     
+    @staticmethod
+    def parse_address(address_str: str) -> Optional[int]:
+        """Parse address string to integer, supporting hex and decimal formats"""
+        if not address_str:
+            return None
+        
+        address_str = address_str.strip()
+        
+        try:
+            # Try hex format first (0x prefix or just hex digits)
+            if address_str.startswith('0x') or address_str.startswith('0X'):
+                return int(address_str, 16)
+            elif all(c in '0123456789abcdefABCDEF' for c in address_str):
+                return int(address_str, 16)
+            else:
+                # Try decimal format
+                return int(address_str, 10)
+        except ValueError:
+            return None
+    
+    @staticmethod
+    def find_symbols_by_address(symbols: List[SymbolInfo], target_address: int) -> List[SymbolInfo]:
+        """Find symbols by address - exact match or closest neighbors"""
+        if not symbols:
+            return []
+        
+        # Find exact match first
+        exact_matches = [s for s in symbols if s.address == target_address]
+        if exact_matches:
+            return exact_matches
+        
+        # Find closest neighbors
+        symbols_with_addr = [s for s in symbols if s.address > 0]  # Filter out symbols with 0 address
+        if not symbols_with_addr:
+            return []
+        
+        # Sort by address to ensure proper ordering
+        symbols_with_addr.sort(key=lambda x: x.address)
+        
+        # Find insertion point
+        left_symbol = None
+        right_symbol = None
+        
+        for i, symbol in enumerate(symbols_with_addr):
+            if symbol.address > target_address:
+                right_symbol = symbol
+                if i > 0:
+                    left_symbol = symbols_with_addr[i - 1]
+                break
+        
+        # If no symbol found with address > target, target is beyond all symbols
+        if right_symbol is None and symbols_with_addr:
+            left_symbol = symbols_with_addr[-1]  # Last symbol
+        
+        # If no symbol found with address < target, target is before all symbols
+        if left_symbol is None and symbols_with_addr:
+            right_symbol = symbols_with_addr[0]  # First symbol
+        
+        result = []
+        if left_symbol:
+            result.append(left_symbol)
+        if right_symbol and right_symbol != left_symbol:
+            result.append(right_symbol)
+        
+        return result
+    
     @classmethod
     def create_search_function(cls, pattern: str, mode: SearchMode) -> Optional[Callable[[str], bool]]:
         """Create a search function based on the mode"""
@@ -165,6 +232,8 @@ class SymbolSearchEngine:
         elif mode == SearchMode.REGEX:
             regex = re.compile(pattern, re.IGNORECASE)
             return lambda symbol_name: regex.search(symbol_name) is not None
+        elif mode == SearchMode.ADDRESS:
+            return None  # Address search is handled separately
         
         return None
     
@@ -172,6 +241,25 @@ class SymbolSearchEngine:
     def filter_symbols(cls, symbols: List[SymbolInfo], pattern: str, 
                       mode: SearchMode, show_functions: bool, show_variables: bool) -> List[SymbolInfo]:
         """Filter symbols based on search criteria"""
+        # Handle address search separately
+        if mode == SearchMode.ADDRESS:
+            target_address = cls.parse_address(pattern)
+            if target_address is None:
+                return []
+            
+            address_matches = cls.find_symbols_by_address(symbols, target_address)
+            
+            # Apply type filter to address matches
+            if show_functions or show_variables:
+                filtered_matches = []
+                for symbol in address_matches:
+                    if (show_functions and symbol.is_function) or (show_variables and symbol.is_variable):
+                        filtered_matches.append(symbol)
+                return filtered_matches
+            
+            return address_matches
+        
+        # Handle other search modes
         search_function = cls.create_search_function(pattern, mode)
         
         matching_symbols = []
@@ -276,7 +364,9 @@ class ELFSymbolSearchGUI:
         ttk.Radiobutton(mode_frame, text="Wildcard", variable=self.search_mode_var, 
                        value=SearchMode.WILDCARD.value, command=self._on_search_mode_change).grid(row=0, column=1, padx=(0, 5))
         ttk.Radiobutton(mode_frame, text="Regex", variable=self.search_mode_var, 
-                       value=SearchMode.REGEX.value, command=self._on_search_mode_change).grid(row=0, column=2)
+                       value=SearchMode.REGEX.value, command=self._on_search_mode_change).grid(row=0, column=2, padx=(0, 5))
+        ttk.Radiobutton(mode_frame, text="Address", variable=self.search_mode_var, 
+                       value=SearchMode.ADDRESS.value, command=self._on_search_mode_change).grid(row=0, column=3)
     
     def _setup_filter_section(self, parent: ttk.Frame) -> None:
         """Setup filter options section"""
@@ -428,6 +518,13 @@ class ELFSymbolSearchGUI:
         except re.error as e:
             messagebox.showerror("Search Error", f"Invalid search pattern:\n{str(e)}")
             self.status_var.set("Invalid search pattern")
+        except Exception as e:
+            if search_mode == SearchMode.ADDRESS and "invalid literal" in str(e).lower():
+                messagebox.showerror("Address Error", f"Invalid address format: {pattern}\nUse hex (0x1234) or decimal (4660) format")
+                self.status_var.set("Invalid address format")
+            else:
+                messagebox.showerror("Search Error", f"Search error:\n{str(e)}")
+                self.status_var.set("Search error")
     
     def _display_search_results(self, pattern: str, search_mode: SearchMode, 
                                show_functions: bool, show_variables: bool, 
@@ -444,11 +541,33 @@ class ELFSymbolSearchGUI:
         
         if pattern:
             mode_name = search_mode.value.capitalize()
-            self.results_text.insert(tk.END, f"Search pattern: {pattern} ({mode_name} mode)\n")
+            if search_mode == SearchMode.ADDRESS:
+                target_address = self.search_engine.parse_address(pattern)
+                if target_address is not None:
+                    self.results_text.insert(tk.END, f"Address search: 0x{target_address:08x} ({mode_name} mode)\n")
+                    
+                    # Check if we found an exact match or neighbors
+                    if matching_symbols:
+                        exact_match = any(s.address == target_address for s in matching_symbols)
+                        if exact_match:
+                            self.results_text.insert(tk.END, "Found exact address match!\n")
+                        else:
+                            self.results_text.insert(tk.END, "No exact match found - showing nearest symbols:\n")
+                            for symbol in matching_symbols:
+                                if symbol.address < target_address:
+                                    self.results_text.insert(tk.END, f"  Before: {symbol.name} at 0x{symbol.address:08x}\n")
+                                else:
+                                    self.results_text.insert(tk.END, f"  After: {symbol.name} at 0x{symbol.address:08x}\n")
+                    else:
+                        self.results_text.insert(tk.END, "No symbols found near this address\n")
+                else:
+                    self.results_text.insert(tk.END, f"Invalid address format: {pattern}\n")
+            else:
+                self.results_text.insert(tk.END, f"Search pattern: {pattern} ({mode_name} mode)\n")
         
         if filter_info:
             self.results_text.insert(tk.END, f"Filtered by type: {', '.join(filter_info)}\n")
-        else:
+        elif search_mode != SearchMode.ADDRESS:
             self.results_text.insert(tk.END, "Showing all symbol types\n")
         
         self.results_text.insert(tk.END, f"Matching symbols: {len(matching_symbols)}\n")
@@ -458,10 +577,21 @@ class ELFSymbolSearchGUI:
         
         # Update status
         mode_name = search_mode.value.capitalize()
-        if filter_info:
-            self.status_var.set(f"Found {len(matching_symbols)} symbols ({mode_name}, {', '.join(filter_info)})")
+        if search_mode == SearchMode.ADDRESS:
+            if matching_symbols:
+                target_address = self.search_engine.parse_address(pattern)
+                exact_match = any(s.address == target_address for s in matching_symbols) if target_address else False
+                if exact_match:
+                    self.status_var.set(f"Found exact address match at 0x{target_address:08x}")
+                else:
+                    self.status_var.set(f"Found {len(matching_symbols)} nearest symbols to 0x{target_address:08x}")
+            else:
+                self.status_var.set("No symbols found near specified address")
         else:
-            self.status_var.set(f"Found {len(matching_symbols)} symbols ({mode_name} mode)")
+            if filter_info:
+                self.status_var.set(f"Found {len(matching_symbols)} symbols ({mode_name}, {', '.join(filter_info)})")
+            else:
+                self.status_var.set(f"Found {len(matching_symbols)} symbols ({mode_name} mode)")
     
     def _on_search_change(self, event: tk.Event) -> None:
         """Handle search pattern change with debouncing"""
